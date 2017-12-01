@@ -17,10 +17,11 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	git "gopkg.in/src-d/go-git.v4"
+	git "gopkg.in/libgit2/git2go.v26"
 )
 
 // rpromptCmd represents the rprompt command
@@ -28,12 +29,8 @@ var rpromptCmd = &cobra.Command{
 	Use:   "rprompt",
 	Short: "rprompt",
 	Long:  `rprompt`,
+	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		if len(args) < 1 {
-			fmt.Println("Not enough arguments to prompt")
-			os.Exit(1)
-		}
-
 		pwd := args[0]
 		components := []string{
 			formatVim(),
@@ -44,71 +41,85 @@ var rpromptCmd = &cobra.Command{
 }
 
 func formatVim() string {
-	if os.Getenv("VIM") != "" {
-		return color.CyanString("")
+	if os.Getenv("VIM") == "" {
+		return ""
 	}
-	return ""
+	return color.CyanString("")
+}
+
+type StatusSummary struct {
+	Untracked bool
+	Unmerged  bool
+	Modified  bool
+	Staged    bool
 }
 
 func formatGitStatus(path string) string {
-	repo, err := git.PlainOpen(path)
+	repo, err := git.OpenRepository(path)
 	if err != nil {
-		if err == git.ErrRepositoryNotExists {
-			return ""
-		}
-		fmt.Println("Could not open git repository")
-		os.Exit(1)
+		return ""
 	}
 
-	tree, err := repo.Worktree()
+	statuses, err := repo.StatusList(&git.StatusOptions{
+		Show:  git.StatusShowIndexAndWorkdir,
+		Flags: git.StatusOptExcludeSubmodules | git.StatusOptIncludeUntracked | git.StatusOptDisablePathspecMatch,
+	})
+
 	if err != nil {
-		fmt.Println("Unable to open working tree")
-		os.Exit(1)
+		return ""
 	}
 
-	status, err := tree.Status()
-	if err != nil {
-		fmt.Println("Could not get working status")
-		os.Exit(1)
+	return summarizeGitStatusList(statuses).String()
+}
+
+func (ws *StatusSummary) String() string {
+	out := []string{}
+
+	if ws.Staged {
+		out = append(out, color.GreenString("●"))
 	}
 
-	var untracked, unmerged, modified, staged bool
-	for _, fs := range status {
-		switch fs.Staging {
-		case git.Unmodified, git.Untracked:
-			// no fallthrough
-		default:
-			staged = true
+	if ws.Modified {
+		out = append(out, color.YellowString("●"))
+	} else if ws.Unmerged {
+		out = append(out, color.YellowString("■"))
+	}
+
+	if ws.Untracked {
+		out = append(out, color.RedString("●"))
+	}
+
+	return strings.Join(out, " ")
+}
+
+func summarizeGitStatusList(statuses *git.StatusList) *StatusSummary {
+	summ := new(StatusSummary)
+
+	count, err := statuses.EntryCount()
+	if err != nil {
+		return summ
+	}
+
+	for i := 0; i < count; i++ {
+		entry, err := statuses.ByIndex(i)
+		if err != nil {
 			continue
 		}
 
-		switch fs.Worktree {
-		case git.Untracked:
-			untracked = true
-		case git.Modified:
-			modified = true
-		case git.UpdatedButUnmerged:
-			unmerged = true
+		switch entry.Status {
+		case git.StatusIndexNew,
+			git.StatusIndexModified,
+			git.StatusIndexDeleted,
+			git.StatusIndexRenamed:
+			summ.Staged = true
+		case git.StatusWtModified:
+			summ.Modified = true
+		case git.StatusWtNew:
+			summ.Untracked = true
 		}
 	}
 
-	statusString := ""
-
-	if staged {
-		statusString += color.GreenString("● ")
-	}
-
-	if modified {
-		statusString += color.YellowString("● ")
-	} else if unmerged {
-		statusString += color.YellowString("■ ")
-	}
-
-	if untracked {
-		statusString += color.RedString("●")
-	}
-
-	return statusString
+	return summ
 }
 
 func init() {

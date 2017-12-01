@@ -14,23 +14,23 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"gopkg.in/src-d/go-git.v4"
+	git "gopkg.in/libgit2/git2go.v26"
 )
+
+var keymapFlag string
 
 // promptCmd represents the prompt command
 var promptCmd = &cobra.Command{
 	Use:   "prompt",
 	Short: "prompt",
 	Long:  `prompt`,
+	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		if len(args) < 1 {
-			panic("Not enough arguments to prompt")
-		}
-
 		pwd := args[0]
 		components := []string{
 			formatCurrentPath(pwd),
@@ -41,59 +41,96 @@ var promptCmd = &cobra.Command{
 	},
 }
 
-func joinNonEmpty(xss []string, sep string) (ret string) {
-	for _, xs := range xss {
-		if xs != "" {
-			ret += xs
-			ret += sep
+func joinNonEmpty(xss []string, sep string) string {
+	return strings.Join(filterEmpty(xss), sep)
+}
+
+func filterEmpty(in []string) (out []string) {
+	for _, s := range in {
+		if s != "" {
+			out = append(out, s)
 		}
 	}
 	return
 }
 
 func formatKeymap() string {
-	return color.WhiteString("λ.")
-}
+	sym := "λ."
 
-func coalesce(xss ...string) string {
-	for _, str := range xss {
-		if len(str) > 0 {
-			return str
-		}
+	if keymapFlag == "vicmd" {
+		return color.HiWhiteString(sym)
 	}
-	return ""
+
+	return color.WhiteString(sym)
 }
 
 func formatGitInfo(path string) string {
-	action := color.YellowString("")
-
-	repo, err := git.PlainOpen(path)
+	repo, err := git.OpenRepository(path)
 	if err != nil {
-		if err == git.ErrRepositoryNotExists {
-			return ""
-		}
-		panic("Could not open git repository")
+		return ""
 	}
 
 	ref, err := repo.Head()
 	if err != nil {
-		return color.RedString("empty")
+		return ""
 	}
 
-	branch := ref.Name().Short()
-	if branch != "" {
-		return color.BlueString(branch) + action
+	gi := &GitInfo{
+		Action: showRepositoryState(repo.State()),
+		Branch: ref.Shorthand(),
+		Commit: ref.Target().String(),
 	}
 
-	cobj, err := repo.CommitObject(ref.Hash())
-	if err == nil {
-		commit := cobj.ID().String()
-		return color.BlueString(commit) + action
+	return gi.String()
+}
+
+func showRepositoryState(state git.RepositoryState) string {
+	switch state {
+	case git.RepositoryStateMerge:
+		return "merge"
+	case git.RepositoryStateRevert:
+		return "revert"
+	case git.RepositoryStateCherrypick:
+		return "cherry-pick"
+	case git.RepositoryStateBisect:
+		return "bisect"
+	case git.RepositoryStateRebase:
+		return "rebase"
+	case git.RepositoryStateRebaseInteractive:
+		return "rebase-interactive"
+	case git.RepositoryStateRebaseMerge:
+		return "rebase-merge"
+	default:
+		return ""
+	}
+}
+
+type GitInfo struct {
+	Action string
+	Branch string
+	Commit string
+}
+
+func (gi *GitInfo) String() (out string) {
+	var info string
+
+	if gi.Branch != "" && gi.Branch != "HEAD" {
+		info += color.BlueString(gi.Branch)
+	} else if len(gi.Commit) > 1000 {
+		info += color.BlueString(gi.Commit[:7])
+	} else {
+		res, err := exec.Command("git", "describe", "--all", "--contains").Output()
+		if err == nil {
+			desc := string(res[:len(res)-1]) // strip trailing '\n'
+			info += color.MagentaString(desc)
+		}
 	}
 
-	position := ref.Target().String()
-	return color.MagentaString(position) + action
+	if gi.Action != "" {
+		info += ":" + color.YellowString(gi.Action)
+	}
 
+	return info
 }
 
 func formatCurrentPath(path string) string {
@@ -103,7 +140,7 @@ func formatCurrentPath(path string) string {
 
 func trunc(path string) string {
 	skip := false
-	rarr := make([]rune, 16)
+	buff := make([]rune, 16)
 	last := strings.LastIndex(path, "/")
 
 	for i, c := range path {
@@ -127,12 +164,13 @@ func trunc(path string) string {
 				skip = true
 			}
 		}
-		rarr = append(rarr, c)
+		buff = append(buff, c)
 	}
 
-	return string(rarr)
+	return string(buff)
 }
 
 func init() {
 	rootCmd.AddCommand(promptCmd)
+	promptCmd.Flags().StringP("keymap", "k", keymapFlag, "Provide the $KEYMAP environment variable")
 }
